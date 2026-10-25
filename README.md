@@ -80,5 +80,10 @@ kubectl -n argocd port-forward svc/argocd-server 8443:443
   with the cluster anyway, but the script is shared by all three clouds so the behaviour is predictable everywhere.
 - **No client secret:** GitHub Actions signs in with a federated credential, trusted only for `main` of this repository.
   The Terraform provider and backend use the same OIDC token (`ARM_USE_OIDC`).
+- **Immutable GitHub OIDC subjects.** Repositories created after 2026-07-15 present
+  `repo:<owner>@<owner_id>/<repo>@<repo_id>:ref:...` instead of `repo:<owner>/<repo>:ref:...`, so a
+  re-created repository with the same name cannot reuse the trust. `bootstrap/github.tf` looks the IDs up
+  in the GitHub API and the federated credential uses them; the old name-only form would be rejected with `AADSTS700213`-style
+  "no matching federated identity" errors.
 - **The cluster admin certificate** (`kube_config`) ends up in the state; the Helm provider uses it to install Argo CD.
   The state sits in a private container reachable only through Entra ID.
