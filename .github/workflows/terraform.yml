@@ -1,0 +1,108 @@
+name: terraform
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "apply = create or update the environment, destroy = delete it"
+        type: choice
+        options: [apply, destroy]
+        default: apply
+  schedule:
+    # Safety net for a pay-per-hour sandbox: whatever is still running at 01:00 UTC is destroyed.
+    - cron: "0 1 * * *"
+
+permissions:
+  contents: read
+  id-token: write # OIDC: federated credential, no client secret stored in GitHub
+
+concurrency:
+  group: terraform
+  cancel-in-progress: false
+
+env:
+  # Terraform's azurerm provider and backend log in with the GitHub OIDC token.
+  ARM_USE_OIDC: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  check:
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hashicorp/setup-terraform@v4
+      - run: terraform fmt -check -recursive
+      - name: Validate
+        run: |
+          for dir in bootstrap infra; do
+            terraform -chdir="$dir" init -backend=false
+            terraform -chdir="$dir" validate
+          done
+      - uses: terraform-linters/setup-tflint@v6
+      - run: tflint --init && tflint --recursive --config "$GITHUB_WORKSPACE/.tflint.hcl"
+
+  apply:
+    if: github.event_name == 'workflow_dispatch' && inputs.action == 'apply'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v7
+      # az CLI is used for kubeconfig only; Terraform authenticates on its own via ARM_* above.
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+      - run: terraform init -backend-config=backend.hcl
+      - run: terraform apply -auto-approve
+      - name: Wait for the app
+        run: |
+          cluster=$(terraform output -raw cluster_name)
+          az aks get-credentials --overwrite-existing \
+            --resource-group "$(terraform output -raw resource_group)" --name "$cluster"
+          bash ../scripts/wait-for-app.sh "$cluster"
+
+  destroy:
+    # The nightly run is skipped until bootstrap has set the repository variables.
+    if: (github.event_name == 'schedule' && vars.AZURE_CLIENT_ID != '') || (github.event_name == 'workflow_dispatch' && inputs.action == 'destroy')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: infra
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_wrapper: false
+      - run: terraform init -backend-config=backend.hcl
+      - name: Remove load balancers and volumes created by Kubernetes
+        run: |
+          rg=$(terraform output -raw resource_group 2> /dev/null || true)
+          cluster=$(terraform output -raw cluster_name 2> /dev/null || true)
+          if [ -n "$cluster" ] && az aks show --resource-group "$rg" --name "$cluster" > /dev/null 2>&1; then
+            az aks get-credentials --overwrite-existing --resource-group "$rg" --name "$cluster"
+            bash ../scripts/drain-cluster.sh "$cluster"
+          else
+            echo "No cluster, nothing to drain."
+          fi
+      - run: terraform destroy -auto-approve
