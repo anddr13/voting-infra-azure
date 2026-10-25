@@ -14,11 +14,11 @@ bootstrap/   once, local state:  Storage Account for state (Entra ID auth only, 
 infra/       daily (apply/destroy):
   Resource group, VNet 10.10.0.0/16, node subnet
   User-assigned cluster identity + Network Contributor on the VNet
-  AKS (Free tier, Azure CNI Overlay): 2 Standard_B2ms nodes (2 vCPU / 8 GiB)
+  AKS (Free tier, Azure CNI Overlay) in swedencentral: 2 Standard_D2as_v5 nodes (2 vCPU / 8 GiB)
   Argo CD + "root" Application → everything else comes from voting-gitops (Traefik/Azure LB, KEDA, Strimzi, Kafka, Redis, Mongo, app)
 ```
 
-**Cost (approximate):** control plane $0 (Free tier) + 2 × B2ms ~$0.17/h + load balancer, IPs and disks ~$0.06/h
+**Cost (approximate):** control plane $0 (Free tier) + 2 × D2as_v5 ~$0.17/h + load balancer, IPs and disks ~$0.06/h
 ≈ **$0.23/h**, i.e. ~$1 for a 4-hour session or ~$5.5 per day. On a trial subscription the $200 starter credit covers it.
 
 ## One-time bootstrap
@@ -70,9 +70,11 @@ kubectl -n argocd port-forward svc/argocd-server 8443:443
   implicitly. The required ones are listed in `resource_providers_to_register`; without them apply fails on a fresh subscription.
 - **A user-assigned identity with its VNet role is created before the cluster.** With a system-assigned identity and a
   custom VNet, Terraform does not grant the role (unlike `az aks create`), and LoadBalancer Services never get an IP.
-- **Region `northeurope`.** New and trial subscriptions are often refused capacity in `westeurope`.
-- **2 × B2ms = 4 vCPU**, exactly the per-region quota of a trial subscription. The AKS system pool cannot be spot,
-  so the workloads run on it.
+- **Region `swedencentral`.** A trial subscription sees only part of the VM catalogue, and it differs per region:
+  checked with `az vm list-skus`, `northeurope` and `polandcentral` offered no general-purpose 2 vCPU size at all,
+  while `swedencentral` offers B-v2, Dasv5/v6 and Dsv5/v6.
+- **2 × D2as_v5 = 4 vCPU**, exactly the per-region quota of a trial subscription (`az vm list-usage`). Not burstable,
+  so Kafka keeps its CPU under load. The AKS system pool cannot be spot, so the workloads run on it.
 - **`scripts/drain-cluster.sh` runs before `destroy`:** it deletes the `root` Application (cascading), LoadBalancer
   Services and PVCs while the cluster is still alive. On Azure these live in the node resource group and would go away
   with the cluster anyway, but the script is shared by all three clouds so the behaviour is predictable everywhere.

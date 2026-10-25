@@ -1,7 +1,7 @@
 variable "location" {
-  description = "Azure region. New and trial subscriptions are often refused capacity in westeurope."
+  description = "Azure region. Trial subscriptions see only some VM sizes per region; swedencentral offers the 2 vCPU ones."
   type        = string
-  default     = "northeurope"
+  default     = "swedencentral"
 }
 
 variable "env" {
@@ -17,9 +17,9 @@ variable "kubernetes_version" {
 }
 
 variable "node_vm_size" {
-  description = "Node size. 2 vCPU / 8 GiB; two of them fit the 4 vCPU quota of a trial subscription."
+  description = "Node size. 2 vCPU / 8 GiB, not burstable (steady CPU for Kafka under load); two of them fit the 4 vCPU quota of a trial subscription."
   type        = string
-  default     = "Standard_B2ms"
+  default     = "Standard_D2as_v5"
 }
 
 variable "node_count" {

@@ -4,9 +4,9 @@ variable "subscription_id" {
 }
 
 variable "location" {
-  description = "Region of the state storage account."
+  description = "Region of the state storage account (same as the cluster)."
   type        = string
-  default     = "northeurope"
+  default     = "swedencentral"
 }
 
 variable "env" {
