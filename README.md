@@ -67,9 +67,9 @@ AKS in swedencentral, 2 × Standard_D2as_v5, Kubernetes 1.36, worker `PROCESSING
 Load: k6 on a laptop in Ukraine at 200 votes/s for 3 minutes through the Azure load balancer, each request from a
 different client id.
 
-| Time (UTC) | Worker replicas | Consumer lag | Node CPU |
+| Time | Worker replicas | Consumer lag | Node CPU |
 |---|---|---|---|
-| 23:59:04, start | 1 | 0 | 11% / 8% |
+| start | 1 | 0 | 11% / 8% |
 | +20 s | 4 | 2,680 | 11% / 8% |
 | +41 s | **6** (max = partitions) | 3,424 | 30% / 33% |
 | peak | 6 | ~3,900, **flat** | 48% / 46% |
