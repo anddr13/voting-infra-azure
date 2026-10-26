@@ -37,8 +37,8 @@ Keep `bootstrap/` around: it costs next to nothing and the Storage Account holds
 ## Create / destroy
 
 GitHub → **Actions → terraform → Run workflow**:
-- `apply`: ~15–20 minutes (AKS ~6–8, Argo CD + Kafka ~8). The job waits until the app responds
-  and writes its URL to the job summary.
+- `apply`: ~10 minutes, measured 9 min 34 s (Terraform incl. AKS 6 min 36 s, then Argo CD + Kafka until the app
+  answered 2 min 37 s). The job waits until the app responds and writes its URL to the job summary.
 - `destroy`: removes everything. A nightly cron (01:00 UTC) runs it in case you forget.
 
 From a laptop:
@@ -59,6 +59,31 @@ kubectl -n voting get kafka,kafkatopic,pods
 kubectl -n voting get scaledobject,hpa -w              # run the k6 test from voting-app in another terminal
 kubectl -n argocd port-forward svc/argocd-server 8443:443
 ```
+
+## Results (measured 2026-10-26)
+
+AKS in swedencentral, 2 × Standard_D2as_v5, Kubernetes 1.36, worker `PROCESSING_DELAY_MS=20`.
+Load: k6 on a laptop in Ukraine at 200 votes/s for 3 minutes through the Azure load balancer, each request from a
+different client id.
+
+| Time (UTC) | Worker replicas | Consumer lag | Node CPU |
+|---|---|---|---|
+| 23:59:04, start | 1 | 0 | 11% / 8% |
+| +20 s | 4 | 2,680 | 11% / 8% |
+| +41 s | **6** (max = partitions) | 3,424 | 30% / 33% |
+| peak | 6 | ~3,900, **flat** | 48% / 46% |
+| end of load | 6 | 2,424 | 43% / 43% |
+| +35 s after the load | 6 | **0** | 32% / 35% |
+| +5 min | **1** (default HPA scale-down stabilisation) | 0 | 14% / 9% |
+
+- **36,001** requests at 200.4/s, 100% answered `202`, 0 failed, no dropped iterations.
+- p95 **74 ms**, median 66 ms: almost all of it is the network round trip from the laptop to Sweden.
+- **Exactly once:** MongoDB holds **36,006** votes = 36,001 from k6 + 5 manual ones; the tallies match the API
+  (cat 18,156 + dog 17,850). DLQ: 0 messages.
+- **Compared with kind** ([voting-infra-local](https://github.com/anddr13/voting-infra-local#results-measured-2026-10-26)):
+  on the laptop the backlog kept growing to 9,251; here it levelled off at ~3,900 because each worker handles a
+  message in ~30 ms instead of ~45 ms. The nodes stayed below 50% CPU, so the ceiling is still the 6 partitions,
+  not the cluster.
 
 ## Pitfalls handled (and why)
 
