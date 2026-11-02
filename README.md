@@ -15,7 +15,7 @@ infra/       daily (apply/destroy):
   Resource group, VNet 10.10.0.0/16, node subnet
   User-assigned cluster identity + Network Contributor on the VNet
   AKS (Free tier, Azure CNI Overlay) in swedencentral: 2 Standard_D2as_v5 nodes (2 vCPU / 8 GiB)
-  Argo CD + "root" Application → everything else comes from voting-gitops (Traefik/Azure LB, KEDA, Strimzi, Kafka, Redis, Mongo, app)
+  Argo CD + "root" Application → everything else comes from voting-gitops (Traefik/Azure LB, KEDA, Strimzi, CloudNativePG, Kafka, Redis, PostgreSQL, app)
 ```
 
 **Cost (approximate):** control plane $0 (Free tier) + 2 × D2as_v5 ~$0.17/h + load balancer, IPs and disks ~$0.06/h
@@ -61,7 +61,38 @@ kubectl -n voting get scaledobject,hpa -w              # run the k6 test from vo
 kubectl -n argocd port-forward svc/argocd-server 8443:443
 ```
 
-## Results (measured 2026-10-26)
+## Results (measured 2026-11-02, PostgreSQL)
+
+Same cluster, voting-gitops `main` with PostgreSQL on CloudNativePG, applied and destroyed by the GitHub Actions
+workflow. Load from [`loadtest/exactly-once-cloud.sh`](https://github.com/anddr13/voting-app/blob/main/loadtest/exactly-once-cloud.sh):
+k6 on a laptop in Ukraine at 200 votes/s for 3 minutes, and 40 s in **every worker process gets SIGKILL**
+(through a `kubectl debug node` pod), so Kafka redelivers what they had not committed.
+
+**Bring-up:** 14 min 41 s (`terraform apply` 8 min 2 s, then 6 min 39 s until the app answered).
+
+| Time | Worker replicas (ready) | Consumer lag | Node CPU |
+|---|---|---|---|
+| start | 1 | 0 | 11% / 10% |
+| +20 s | 4 | 2,969 | 9% / 9% |
+| +36 s | **6** (max = partitions) | 3,097 | 9% / 9% |
+| +40 s | SIGKILL to all six workers | | |
+| +52 s | 6 (3 ready) | 3,804 | 9% / 9% |
+| +1 min 52 s | 6 | **11,277** (peak) | 52% / 53% |
+| end of load (+2 min 52 s) | 6 | 7,708 | 35% / 31% |
+| +62 s after the load | 6 | **0** | 47% / 37% |
+| a few minutes later | **1** | 0 | |
+
+- **35,970** requests, 100% answered `202`, 0 failed; p95 **83.7 ms**.
+- **Exactly once:** 35,970 votes of this run in PostgreSQL = 35,970 accepted; `votes` and `tallies` agree. The
+  restarted workers skipped **257** redelivered votes (`worker_votes_total{outcome="duplicate"}`): the kill really
+  caused redeliveries, and none of them was counted twice.
+- The lag peak is ~3x the MongoDB run below: all six workers restart and the group rebalances, and for those seconds
+  nobody consumes.
+
+**Tear-down:** the first destroy hung (see the drain pitfall below). After the fix: drain 4 s, `terraform destroy`
+19 min 7 s. Afterwards the subscription held only the state Storage Account and Azure's default `NetworkWatcherRG`.
+
+## Results (measured 2026-10-26, MongoDB version)
 
 AKS in swedencentral, 2 × Standard_D2as_v5, Kubernetes 1.36, worker `PROCESSING_DELAY_MS=20`.
 Load: k6 on a laptop in Ukraine at 200 votes/s for 3 minutes through the Azure load balancer, each request from a
@@ -104,6 +135,11 @@ different client id.
 - **`scripts/drain-cluster.sh` runs before `destroy`:** it deletes the `root` Application (cascading), LoadBalancer
   Services and PVCs while the cluster is still alive. On Azure these live in the node resource group and would go away
   with the cluster anyway, but the script is shared by all three clouds so the behaviour is predictable everywhere.
+- **The cascade can deadlock on KafkaTopic finalizers.** Only the Strimzi topic operator removes them, and it runs
+  inside the Kafka cluster. On 2026-11-02 the cascade deleted the Kafka cluster first: the topics, the `data`
+  Application and `root` hung, the drain timed out after 15 min, Argo CD recreated the Traefik Service and
+  `terraform destroy` failed on the `root-app` Helm release. The drain now polls instead of waiting blindly and drops
+  the finalizers of deleted KafkaTopics once no Kafka is left.
 - **No client secret:** GitHub Actions signs in with a federated credential, trusted only for `main` of this repository.
   The Terraform provider and backend use the same OIDC token (`ARM_USE_OIDC`).
 - **Immutable GitHub OIDC subjects.** Repositories created after 2026-07-15 present
